@@ -115,8 +115,8 @@ show_identity = false       # the live status tile is the identity
 buttons = [
   { label = "{mode}", keys = "SHIFT+Tab", size = 18, background = "raised", hint = "Cycle permission mode" },
   { label = "/",      keys = "Slash",     size = 27, hint = "Slash commands" },
-  { label = "@",      keys = "SHIFT+2",   size = 25, hint = "Mention a file" },
-  { label = "!",      keys = "SHIFT+1",   size = 27, color = "green", hint = "Bash mode" },
+  { label = "@",      text = "@",         size = 25, hint = "Mention a file" },
+  { label = "!",      text = "!",         size = 27, color = "green", hint = "Bash mode" },
 ]
 
 [[profiles]]

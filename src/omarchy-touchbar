@@ -2761,7 +2761,8 @@ class TouchBar:
                  fill=entry.get("background", "surface"),
                  fg=entry.get("color", "fg"),
                  size=entry.get("size", 26),
-                 **({"daemon": "run:%s" % entry["run"]} if entry.get("run") else {}))
+                 **({"daemon": "run:%s" % entry["run"]} if entry.get("run") else
+                    {"daemon": "type:%s" % entry["text"]} if entry.get("text") else {}))
             for entry in profile.get("buttons", [])
         ]
         if profile.get("claude"):
@@ -4059,6 +4060,11 @@ class TouchBar:
             self.invalidate_state()
         elif kind == "run" and value:
             self.run_launcher(value)
+        elif kind == "type" and value:
+            # Symbols typed as text, not as a chord: SHIFT+2 is only "@" on a
+            # US layout (on German it is '"'), while wtype's text mode sends
+            # the character itself whatever the keyboard layout.
+            threading.Thread(target=run_wtype, args=([value],), daemon=True).start()
 
     def run_launcher(self, name):
         """Start a program named in the user's [launchers] table.
