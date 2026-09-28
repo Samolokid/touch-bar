@@ -240,6 +240,7 @@ def load_config():
     cfg["profiles"] = [p for p in user.get("profiles", [])
                        if isinstance(p, dict) and p.get("enabled", True) is not False]
     cfg["football"] = user.get("football", {}) if isinstance(user.get("football"), dict) else {}
+    cfg["launchers"] = user.get("launchers", {}) if isinstance(user.get("launchers"), dict) else {}
     return cfg
 
 
@@ -2759,7 +2760,8 @@ class TouchBar:
             spec(entry.get("label", "").replace("{mode}", mode), entry.get("keys"),
                  fill=entry.get("background", "surface"),
                  fg=entry.get("color", "fg"),
-                 size=entry.get("size", 26))
+                 size=entry.get("size", 26),
+                 **({"daemon": "run:%s" % entry["run"]} if entry.get("run") else {}))
             for entry in profile.get("buttons", [])
         ]
         if profile.get("claude"):
@@ -4055,6 +4057,27 @@ class TouchBar:
             hypr('dispatch hl.dsp.focus({ window = "address:%s" })' % value,
                  as_json=False)
             self.invalidate_state()
+        elif kind == "run" and value:
+            self.run_launcher(value)
+
+    def run_launcher(self, name):
+        """Start a program named in the user's [launchers] table.
+
+        Buttons only carry the name, so nothing on the bar can spell out a
+        command; the argv lives in the user's own config file. It runs as a
+        transient user unit so it survives this daemon being restarted - a
+        Touch Bar game swaps the T1Bridge renderer, which stops us.
+        """
+        argv = self.config.get("launchers", {}).get(name)
+        if not (isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv)):
+            sys.stderr.write("omarchy-touchbar: no launcher named %r\n" % name)
+            return
+        try:
+            subprocess.Popen(["systemd-run", "--user", "--collect", "--quiet", "--"] + argv,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as exc:
+            sys.stderr.write("omarchy-touchbar: cannot run %s: %s\n" % (name, exc))
 
     def system_control(self, value):
         """Adjust icon-only hardware controls without showing metric tiles."""
