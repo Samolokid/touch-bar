@@ -4368,6 +4368,19 @@ T1_BUFFERS = 2
 # showing a static layout all day burns in, so keep that behaviour.
 T1_BLANK_AFTER = float(os.environ.get("OMARCHY_TOUCHBAR_BLANK_AFTER", "60"))
 T1_PANEL = None
+# t1bridge's broker publishes the running Touch ID prompt here, one JSON line
+# ({"version":1,"pid":N,"state":"authenticate"}); the built-in renderer draws
+# it, a custom renderer has to do the same or the sensor arms unannounced.
+T1_TOUCH_ID_STATE = "/run/t1bridge/touch-id-state.json"
+T1_TOUCH_ID_PROMPTS = {             # state -> (message, accent)
+    "authenticate": ("Touch ID  ·  place your finger on the sensor", "#7daea3"),
+    "enroll": ("Touch ID  ·  place your finger on the sensor", "#7daea3"),
+    "retry": ("Not recognised  ·  try again", "#d8a657"),
+    "success": ("Recognised", "#a9b665"),
+    "failure": ("Touch ID failed  ·  use your password", "#ea6962"),
+    "failed": ("Touch ID failed  ·  use your password", "#ea6962"),
+    "locked": ("Touch ID locked  ·  use your password", "#ea6962"),
+}
 
 
 def t1_battery_percent():
@@ -4438,6 +4451,7 @@ class T1Panel:
         self.height = BAR_HEIGHT
         self.blank = False
         self.last_pixels = None
+        self.overlay = None           # Touch ID prompt pixels, shown over the bar
         self.events = None            # queue of (fn, contacts) for the input worker
 
     def _packet(self, mtype, request, payload=b""):
@@ -4547,15 +4561,30 @@ class T1Panel:
             raise OSError("cannot rasterise the bar: %s" % exc)
         with self.lock:
             self.last_pixels = pixels
-            if not self.blank:
+            if not self.blank and self.overlay is None:
                 self._submit(pixels)
 
     def set_blank(self, blank):
         with self.lock:
+            blank = blank and self.overlay is None    # never hide a Touch ID prompt
             if blank == self.blank:
                 return
             self.blank = blank
             if blank:
+                self._submit(bytes(self.width * 4 * self.height))
+            elif self.overlay is not None:
+                self._submit(self.overlay)
+            elif self.last_pixels is not None:
+                self._submit(self.last_pixels)
+
+    def set_overlay(self, pixels):
+        """Show `pixels` over the bar until called again with None."""
+        with self.lock:
+            self.overlay = pixels
+            if pixels is not None:
+                self.blank = False
+                self._submit(pixels)
+            elif self.blank:
                 self._submit(bytes(self.width * 4 * self.height))
             elif self.last_pixels is not None:
                 self._submit(self.last_pixels)
@@ -4583,6 +4612,12 @@ def t1_input(bar, panel):
         fn, contacts = panel.events.get()
         now = time.monotonic()
         bar.t1_last_input = now
+        if panel.overlay is not None:
+            # The buttons are hidden behind the Touch ID prompt; a touch there
+            # must not fire whatever sits underneath.
+            finger = None
+            swallow = bool(contacts)
+            continue
         try:
             if fn != fn_was:
                 fn_was = fn
@@ -4641,6 +4676,49 @@ def t1_input(bar, panel):
                     bar.handle_touch_action(action)
         except Exception as exc:  # noqa: BLE001 - keep the input thread alive
             sys.stderr.write("omarchy-touchbar: touch failed: %s\n" % exc)
+
+
+def t1_touch_id_svg(state, width, height):
+    message, accent = T1_TOUCH_ID_PROMPTS.get(state, ("Touch ID", "#7daea3"))
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d">'
+        '<rect width="100%%" height="100%%" fill="#000"/>'
+        '<g font-family="JetBrainsMono Nerd Font" font-weight="bold" '
+        'text-anchor="middle" dominant-baseline="central">'
+        '<text x="%d" y="%d" font-size="34" fill="%s">\U000f0237</text>'
+        '<text x="%d" y="%d" font-size="22" fill="#d4be98">%s</text>'
+        '</g></svg>'
+        % (width, height, width // 2 - 290, height // 2, accent,
+           width // 2 + 20, height // 2, html.escape(message)))
+
+
+def t1_watch_touch_id(panel):
+    """Mirror t1bridge's Touch ID prompt onto the panel while it runs."""
+    shown = None
+    while True:
+        time.sleep(0.1)
+        state = None
+        try:
+            with open(T1_TOUCH_ID_STATE) as handle:
+                record = json.loads(handle.read(4096) or "null")
+            # A record left behind by a dead broker is not a live prompt.
+            if isinstance(record, dict) and record.get("version") == 1 \
+                    and os.path.exists("/proc/%d" % int(record.get("pid", 0))):
+                state = str(record.get("state", ""))
+        except (OSError, ValueError, TypeError):
+            pass
+        if state == shown:
+            continue
+        shown = state
+        try:
+            if state is None:
+                panel.set_overlay(None)
+            else:
+                panel.set_overlay(t1_rasterize(
+                    t1_touch_id_svg(state, panel.width, panel.height),
+                    panel.width, panel.height))
+        except (OSError, subprocess.SubprocessError, GLib_Error) as exc:
+            sys.stderr.write("omarchy-touchbar: Touch ID prompt failed: %s\n" % exc)
 
 
 def t1_blank_when_idle(bar, panel):
@@ -5495,6 +5573,8 @@ def run_daemon():
     if BACKEND == "t1":
         threading.Thread(target=t1_input, args=(bar, T1_PANEL), daemon=True).start()
         threading.Thread(target=t1_blank_when_idle, args=(bar, T1_PANEL),
+                         daemon=True).start()
+        threading.Thread(target=t1_watch_touch_id, args=(T1_PANEL,),
                          daemon=True).start()
     else:
         threading.Thread(target=watch_fn, args=(bar,), daemon=True).start()
